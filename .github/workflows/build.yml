@@ -100,9 +100,16 @@ jobs:
           if [ -n "$DEVICE" ]; then
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
-          else
-            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # A device whose stock build is not served at a URL that carries it
+          # names no [stock] table, and is made by hand: its image is added to
+          # the release afterwards, so it is left out of the build here.
+          echo "devices=$(for config in devices/*.toml; do
+            if python3 -c 'import sys, tomllib; sys.exit(0 if "stock" in tomllib.load(open(sys.argv[1], "rb")) else 1)' "$config"; then
+              basename "$config" .toml
+            fi
+          done | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
 
   recovery:
     name: Recovery for ${{ matrix.device }}
@@ -188,8 +195,10 @@ jobs:
         working-directory: images
         run: sha256sum -- *.zip > SHA256SUMS
       # Each zip shows on the release as the phone it is for, its model and
-      # then its codename, which is how people look for theirs; a device
-      # whose zip is missing stops the release.
+      # then its codename, which is how people look for theirs. A device
+      # whose stock is not served at a URL is built by hand and its zip added
+      # to the release afterwards, so a device with no zip here is left out
+      # rather than stopping the release.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -198,8 +207,8 @@ jobs:
           zips=()
           for config in devices/*.toml; do
             device=$(basename "$config" .toml)
+            zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip 2>/dev/null) || continue
             model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "$config")
-            zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$device"-*.zip)
             zips+=("$zip#$model ($device)")
           done
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${zips[@]}" images/SHA256SUMS
