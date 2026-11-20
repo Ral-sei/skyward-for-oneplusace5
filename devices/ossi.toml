@@ -1,0 +1,182 @@
+[device]
+# OnePlus calls the phone ossi in its own build; the community's tree calls
+# the Chinese variant giuliac and the global 13R giulia.
+codename = "ossi"
+brand = "OnePlus"
+model = "OnePlus Ace 5"
+ab = true
+# File transfer is served by the recovery itself: its own rules mount the
+# function, and the port offers it beside adb once both have their
+# descriptors. The stock rules have none for it.
+mtp = true
+# qseecomd runs in the tee domain on OPLUS, and this recovery's own policy
+# keeps the recovery domain from the tee and dma-heap nodes it opens; the
+# port's own recoveries run permissive.
+selinux_permissive = true
+soc = { hans = "第三代骁龙®8移动平台", hant = "第三代驍龍®8行動平台", en = "Snapdragon® 8 Gen 3 Mobile Platform" }
+# ro.build.display.id is PKG110_11_A.01 on ColorOS and the port's own build
+# on the Xiaomi system this phone runs, so the default is kept.
+
+[display]
+width = 1264
+height = 2780
+density = 480
+diagonal = 6.78
+# The stock system rounds the panel's corners to this, as its display
+# service reports them.
+corner_radius = 134
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+# The touchscreen: Synaptics S3910 over SPI, driven by OPLUS's TouchComm
+# driver, whose input device carries positions itself. The vibration motor:
+# qcom-hv-haptics, which makes the force-feedback device the click is played
+# through. The NFC chip: NXP's NCI driver makes /dev/nq-nci, which the
+# secure element's service opens to power the eSE on before it talks to its
+# app in the secure world; OPLUS's layer and the ST54's GPIO node are there
+# for the chip's own way in, which this phone's service does not take.
+load = [
+    "oplus_bsp_synaptics_tcm2",
+    "qcom-hv-haptics",
+    "nxp-nci",
+    # The USB port's data path: the Type-C switch in the codec, the switch
+    # chip beside it, the redriver and repeater in front of them, and the
+    # charge driver their events go through. The gadget and the port's role
+    # are up without them, and a computer sees nothing of the phone: the
+    # switch stays where the bootloader left it, and a bound gadget has no
+    # wires behind it.
+    # The switch itself is a block of the codec, and its driver is the one
+    # that reports a cable to the charge driver and turns the port to the
+    # phone once the role switch asks.
+    "wcd939x_dlkm",
+    "wcd_usbss_i2c",
+    "fsa4480-i2c",
+    "redriver",
+    "repeater",
+    "repeater-qti-pmic-eusb2",
+]
+
+# The NFC chip's node, which its driver makes root's alone. The secure
+# element's service opens it as the nfc account to power the eSE on, as
+# /vendor/etc/ueventd.rc gives it to that account; a recovery's own
+# ueventd does not see a node made after it has read the rules.
+[[owners]]
+user = "nfc"
+group = "nfc"
+mode = 0o660
+paths = ["/dev/nq-nci"]
+
+# The firmware of the WLAN chip, and the apps the secure world loads, are on
+# the modem partition, which the phone mounts at /vendor/firmware_mnt and its
+# own recovery leaves unmounted.
+[firmware]
+partition = "modem"
+
+# The persist partition, which the phone mounts at /mnt/vendor/persist and
+# its own recovery leaves unmounted. The WLAN's MAC address would be there,
+# though this phone's vendor image links to a file its own persist does not
+# hold, so the chip falls back to its own. The secure world keeps its files
+# there as well.
+[partitions]
+mounted = ["persist"]
+
+# What the phone's own init runs once the system has finished starting, as
+# kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc: user root, in
+# the groups that line names. The kernel starts the CPU clusters on the
+# performance governor and keeps idle CPUs from powering down until the
+# script hands them to WALT and sets how the memory bus scales.
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root", "system", "wakelock", "graphics"]
+
+# WLAN: Qualcomm's Kiwi on PCIe, driven by qca_cld3_kiwi_v2 over the cnss2
+# platform driver. rfkill is not built into this kernel but is one of its own
+# modules, in system_dlkm, and the vendor's modules.dep does not name it
+# though cfg80211 needs its symbols: cfg80211 is refused with unknown rfkill
+# symbols unless it is loaded first, so it is asked for beside the driver,
+# and modules.dep brings cfg80211 and cnss2 with the driver. Once
+# fs_ready is written, cnss2 powers the chip up and loads its firmware from
+# the modem partition, and wlan0 appears. That handshake takes about twenty
+# seconds here, and cnss2 may disconnect and connect again within it, so the
+# wait for the interface is long enough to sit through both. The driver asks
+# the firmware loader for its settings, which the vendor partition keeps in
+# /vendor/etc/wifi/kiwi_v2; its MAC file link points at a file persist does
+# not hold, which the driver takes as no address of its own and replaces
+# with a random one. wpa_supplicant runs on the recovery's own libraries
+# before the vendor partition's, as on the Xiaomi phones: the vendor
+# partition carries its own copies of the lowest of them, and a program
+# loading those would not be understood by the recovery's service directory.
+[wlan]
+modules = ["rfkill", "qca_cld3_kiwi_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+firmware = [
+    { name = "wlan/qca_cld/kiwi_v2/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/kiwi_v2/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/kiwi_v2/WCNSS_qcom_cfg.ini" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+# qcom-hv-haptics. Its lra_frequency_hz reads 0 until the stock haptic HAL
+# calibrates the motor, which a recovery never runs; the driver's t_lra_us
+# is the period it does keep, 5882 µs on this phone, so the motor swings at
+# 170.0 Hz. The click is made from samples at that frequency, and the
+# strengths are the ones the Xiaomi phones play at three quarters and a
+# quarter, which the same driver gives.
+[haptics]
+period_us = "/sys/class/qcom-haptics/t_lra_us"
+strength = { lightest = 0.25, strongest = 0.75 }
+
+# The partitions a backup of the baseband and EFS takes: the baseband's
+# settings, with the IMEI, the modem's own backups, and the phone's static
+# and dynamic NV backups. oplusstanvbk is kept per slot and is left out,
+# since a restore puts a part back under the name it was taken from.
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist", "oplusdycnvbk"]
+data_skipped = [
+    "vendor/tzstorage",
+    "vendor/qtee",
+    "vendor/fingerprint",
+    "vendor/fingerprint_ori",
+    "vendor/secure_element",
+    "vendor/tui",
+]
+
+# Where the phone's own programs keep logs in the data partition: the
+# system's, the minidumps, what OPLUS's log service keeps, the modem's and
+# the WLAN's crash records, and the logs of the Xiaomi system this phone
+# runs.
+[wipe]
+logs = [
+    "/data/vendor/oplus/log",
+    "/data/vendor/olog",
+    "/data/vendor/diag",
+    "/data/vendor/bsplog",
+    "/data/vendor/log",
+    "/data/vendor/imslogs",
+    "/data/vendor/qms_logs",
+    "/data/vendor/tz_log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ramdump_ssr",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/camera/coredump",
+    "/data/vendor/camera_remote_dump",
+    "/data/tombstones",
+    "/data/ramdump",
+    "/data/miuilog",
+]
+
+# The stock build the recovery is made on is ColorOS 16.1, whose factory
+# package names itself PKG110_11.F.53_2530_202606082356. Its
+# images/recovery.img, 100 MiB and SHA-256
+# 6e2c934c1b3cf3dda29d9fa3b41ca1c343d1fbb0d7e5c06c44a143bde465144c, is
+# given to `skyward-pack recovery` as --stock. No [stock] table names a
+# package: this one is not served at a URL that carries its version.
+

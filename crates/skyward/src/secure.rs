@@ -163,6 +163,21 @@ pub fn libraries() -> Result<Option<PathBuf>> {
     Ok(bundle(&format!("com.android.vndk.v{version}"))?.map(|at| at.join(BUNDLE_LIBS)))
 }
 
+/// The same bundle, where it can be opened, and none where it cannot: a
+/// phone whose recovery cannot mount the bundle, as one whose installed
+/// system and vendor interface come from different builds can, still
+/// starts its programs on the recovery's own libraries and the vendor
+/// partition's. The reason goes to the kernel log.
+pub fn libraries_or_none() -> Option<PathBuf> {
+    match libraries() {
+        Ok(libraries) => libraries,
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
+            None
+        }
+    }
+}
+
 /// Open the bundle of this name where it lies, and give where it is. A
 /// bundle the phone does not carry gives nothing; one already open is left
 /// as it is.

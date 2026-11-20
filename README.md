@@ -122,6 +122,7 @@ not been verified.
 | 🚧 REDMI K90 Ultra | `warsaw` | OS3.0.309.0.WHPCNXM (Android 16) |
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM (Android 17) |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM (Android 17) |
+| 🚧 OnePlus Ace 5 | `ossi` | ColorOS PKG110_11.F.53_2530_202606082356 (Android 16) |
 
 ## Installing Skyward
 

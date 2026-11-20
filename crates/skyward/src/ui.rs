@@ -137,10 +137,14 @@ impl Backlight {
 /// their factory tests drive the panel to, on the backlight's own scale:
 /// the 13 Ultra's panels give that level as well, and it comes to the same
 /// half of their range as the normal maximum they give.
-const NORMAL_MAX: [(&str, &str); 3] = [
+const NORMAL_MAX: [(&str, &str); 4] = [
     ("mi,normal-max-brightness-clone", "mi,max-brightness-clone"),
     ("mi,max-brightness-normal", "qcom,mdss-dsi-bl-max-level"),
     ("mi,mdss-dsi-fac-bl-max-level", "qcom,mdss-dsi-bl-max-level"),
+    // OPLUS's panels give the level their stock slider stops at, below the
+    // high brightness mode, and the whole of the backlight's range beside
+    // it: the Ace 5 stops at 3515 of 4094.
+    ("oplus,dsi-brightness-normal-max-level", "qcom,mdss-brightness-max-level"),
 ];
 
 /// The raw backlight level, out of `max`, at the panel's normal maximum.
@@ -210,7 +214,7 @@ impl Transfer {
             battery: Box::new(|| skyward_info::battery_now().ok().flatten().map(|b| b.level)),
         };
         let service = skyward_mtp::Service::start(device, skyward_ui::fmt::rules(zone).clone())?;
-        skyward_sys::usb::set_mtp(true);
+        skyward_sys::usb::set_mtp(cfg.device.mtp);
         Ok(Transfer { service, offered: false, zone })
     }
 
@@ -1538,10 +1542,7 @@ impl<'a> Pages<'a> {
         if let Some(w) = &cfg.wlan {
             self.app.state.wlan = Some(Wlan::default());
             let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
-            let libraries = secure::libraries().unwrap_or_else(|e| {
-                let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
-                None
-            });
+            let libraries = secure::libraries_or_none();
             self.wlan = Some(wlan::Worker::start(w.clone(), modules, libraries, self.servers.clone())?);
         }
         self.scanned_at = Instant::now();

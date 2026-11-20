@@ -290,7 +290,7 @@ fn main() -> Result<()> {
             let slot = booted_slot()?;
             let props = skyward_info::installed_props(slot)?;
             let services: Vec<Started> = DeviceConfig::load(&config)?.services.into_iter().filter(|s| s.runs_on(&props)).map(Started::from).collect();
-            let libraries = secure::libraries()?;
+            let libraries = secure::libraries_or_none();
             services::start(&services, libraries.as_deref())?;
             keys::start(&keys::found(slot, libraries.as_deref())?.steps?)?;
             loop {
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         Cmd::Keys => {
-            for line in keys::describe(&keys::found(booted_slot()?, secure::libraries()?.as_deref())?.steps?) {
+            for line in keys::describe(&keys::found(booted_slot()?, secure::libraries_or_none().as_deref())?.steps?) {
                 println!("{line}");
             }
             Ok(())
@@ -443,7 +443,7 @@ fn main() -> Result<()> {
             // keys are read from the partitions again, as it read them;
             // where they do not show, it started none.
             let mut programs = cfg.services.clone();
-            match booted_slot().and_then(|slot| keys::found(slot, secure::libraries()?.as_deref())?.steps) {
+            match booted_slot().and_then(|slot| keys::found(slot, secure::libraries_or_none().as_deref())?.steps) {
                 Ok(steps) => programs.extend(keys::programs(&steps)),
                 Err(e) => eprintln!("the programs of the phone's keys are not known: {e:#}"),
             }
@@ -587,7 +587,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
         secure::publish_descriptions(&told)?;
         skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?;
     }
-    let libraries = secure::libraries()?;
+    let libraries = secure::libraries_or_none();
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
@@ -744,6 +744,11 @@ fn adopt_installed_version(props: &std::collections::HashMap<String, String>) ->
 fn recovery() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let run = || -> Result<()> {
+        // A marker written before anything else: it tells, after a reset,
+        // whether the recovery service itself started and whether cache or
+        // persist could take a file at that moment.
+        let _ = std::fs::write("/cache/skyward-started", b"1");
+        let _ = std::fs::write("/persist/skyward-started", b"1");
         // Open to the programs the recovery runs as other users, the
         // supplicant among them, whatever the umask.
         std::fs::create_dir_all(skyward_sys::RUN).with_context(|| format!("make {}", skyward_sys::RUN))?;
@@ -751,11 +756,19 @@ fn recovery() -> Result<()> {
             .with_context(|| format!("open {} to the recovery's other users", skyward_sys::RUN))?;
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
         // A recovery that ended with a function of its own in the port took
-        // the port with it; going through "none" takes that function off.
-        if skyward_sys::prop("sys.usb.state").is_some_and(|s| s != "adb") {
-            skyward_sys::usb::set("none", std::time::Duration::from_secs(5))?;
+        // the port with it, and the stock rules set "adb" before this
+        // recovery mounted functionfs, so adbd may have started and failed
+        // already. Going through "none" and back starts it again now that
+        // the mount is there.
+        // adb is what a failure later on is inspected through; a port that
+        // will not come up as adb still leaves the screen and the keys.
+        if let Err(e) = skyward_sys::usb::switch("adb", std::time::Duration::from_secs(5)) {
+            let _ = skyward_sys::kmsg(&format!("adb is not up on the USB port: {e:#}"));
         }
-        skyward_sys::set_prop("sys.usb.config", "adb")?;
+        // What the port came to, and what is missing where it did not, so
+        // the log read from the phone's own system shows where the chain
+        // stopped.
+        let _ = skyward_sys::kmsg(&format!("usb: {}", skyward_sys::usb::status()));
         let misc = bcb::misc();
         let message = bcb::read(&misc)?;
         let request = message.request();
@@ -763,6 +776,11 @@ fn recovery() -> Result<()> {
             bcb::clear(&misc)?;
         }
         let cfg = DeviceConfig::load(Path::new("/").join(ramdisk::CONFIG))?;
+        if cfg.device.selinux_permissive
+            && let Err(e) = std::fs::write("/sys/fs/selinux/enforce", "0")
+        {
+            let _ = skyward_sys::kmsg(&format!("SELinux stays enforcing: {e:#}"));
+        }
         skyward_sys::kmsg(&format!(
             "{} {} recovery up, misc command {:?} args {:?}, asking for {:?}",
             cfg.device.codename,
@@ -818,6 +836,15 @@ fn recovery() -> Result<()> {
             let mut programs = cfg.services.clone();
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 programs.extend(prepare(&cfg, booted_slot()?)?);
+                // The port's switch, redriver and repeater are among the
+                // modules prepare loads, and a gadget bound before them has
+                // no wires behind it: the port's configuration stands, the
+                // device controllers are there, and no computer sees a
+                // thing. Bind again now that they are up.
+                if let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), std::time::Duration::from_secs(10)) {
+                    let _ = skyward_sys::kmsg(&format!("adb is not up with the port's own modules loaded: {e:#}"));
+                }
+                let _ = skyward_sys::kmsg(&format!("usb after the modules: {}", skyward_sys::usb::status()));
             }
             let root = Path::new("/");
             ui::run(&cfg, &programs, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
@@ -847,7 +874,8 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
             for m in &mounts.partitions {
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
             }
-            let found = secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
+            let libraries = secure::libraries_or_none();
+            let found = keys::found(slot, libraries.as_deref());
             let steps = found.as_ref().ok().and_then(|found| found.steps.as_deref().ok());
             let programs = steps.map(keys::programs).unwrap_or_default();
             // Without them the screen still shows and the keys still work,

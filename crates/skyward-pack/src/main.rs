@@ -155,17 +155,33 @@ fn main() -> Result<()> {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            // OPLUS's stock recovery counts five minutes from its start and
+            // then reboots the phone, so that a recovery left waiting does
+            // not stay: the stock init starts phoenix_recovery, which runs
+            // that clock and the reboot. A recovery someone uses has no such
+            // clock. The line that starts the service is left out, and the
+            // service is marked disabled as well, since it is of the default
+            // class the rules start.
+            let rules = rd.find(paths::INIT_RC).map(|entry| entry.data.clone());
+            if let Some(rules) = rules {
+                let without = without_service(&rules, "phoenix_recovery");
+                if without != rules {
+                    rd.replace(paths::INIT_RC, without)?;
+                }
+            }
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
-            // 0; init lets a later line of a property file override an earlier
-            // one. update_engine refuses a package built before the recovery
-            // itself unless both of the last two are set; the recovery checks
-            // packages against the installed system instead.
+            // 0; the stock file's own lines for these are left out below, so
+            // only what is set here is read for them. update_engine refuses a
+            // package built before the recovery itself unless both of the last
+            // two are set; the recovery checks packages against the installed
+            // system instead.
             let stock_props = &rd
                 .find(paths::PROP_DEFAULT)
                 .with_context(|| format!("{} is not in the ramdisk", paths::PROP_DEFAULT))?
                 .data;
-            let mut props = without(stock_props, &BUILD_VERSION);
+            let drop: Vec<&str> = BUILD_VERSION.iter().chain(REPLACED.iter()).copied().collect();
+            let mut props = without(stock_props, &drop);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
@@ -246,6 +262,11 @@ fn partition_size(stock: &Path) -> Result<usize> {
 /// fill in from the installed system once it has that mounted.
 const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
+/// What the recovery then sets itself, which a stock file has lines for
+/// too; those are left out beside the names above, so nothing of the
+/// stock's value is read for them whatever order init takes.
+const REPLACED: [&str; 4] = ["ro.secure", "ro.adb.secure", "ro.debuggable", "ro.ota.allow_downgrade"];
+
 /// The scheduling profiles a recovery's programs look up by name. A
 /// recovery's cgroup setup mounts no controllers, so of all a system's
 /// profiles do, only the timer slack applies here.
@@ -265,6 +286,60 @@ fn without(props: &[u8], names: &[&str]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// An init rules file that never starts `service`: the lines that start it
+/// are left out, and its definition is marked `disabled`, so that a class
+/// the rules start does not take it either.
+fn without_service(rules: &[u8], service: &str) -> Vec<u8> {
+    let lines: Vec<&[u8]> = rules.split_inclusive(|b| *b == b'\n').collect();
+    let mut out = Vec::with_capacity(rules.len() + 16);
+    for (i, line) in lines.iter().enumerate() {
+        let text = line_without_newline(line);
+        let mut words = words_of(text);
+        let first = words.next();
+        let second = words.next();
+        if first == Some(&b"start"[..]) && second == Some(service.as_bytes()) {
+            continue;
+        }
+        out.extend_from_slice(line);
+        if first == Some(&b"service"[..]) && second == Some(service.as_bytes()) && !says_disabled(&lines[i + 1..]) {
+            if !line.ends_with(b"\n") {
+                out.push(b'\n');
+            }
+            out.extend_from_slice(b"    disabled\n");
+        }
+    }
+    out
+}
+
+/// Whether the service definition the lines belong to says it is disabled:
+/// its option lines are the indented ones, up to the first that is not.
+fn says_disabled(lines: &[&[u8]]) -> bool {
+    for line in lines {
+        let text = line_without_newline(line);
+        if text.is_empty() || text.starts_with(b"#") {
+            continue;
+        }
+        if !text.starts_with(b" ") && !text.starts_with(b"\t") {
+            return false;
+        }
+        if words_of(text).next() == Some(&b"disabled"[..]) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A line without the newline that ends it, and the carriage return before
+/// it if there is one.
+fn line_without_newline(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\n").map(|line| line.strip_suffix(b"\r").unwrap_or(line)).unwrap_or(line)
+}
+
+/// The words of a line, its blanks taken as separators.
+fn words_of(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    text.split(|b| *b == b' ' || *b == b'\t').filter(|word| !word.is_empty())
 }
 
 /// Write `bytes`, the image `img` makes, to `out`.
@@ -367,6 +442,23 @@ ro.vendor.build.security_patch=2026-10-01\nro.vendor.build.security_patch_level=
         assert!(partition_size(&path).is_err(), "an image cut short of its partition's end");
         std::fs::write(&path, b"AVBf").unwrap();
         assert!(partition_size(&path).is_err(), "too short to end in a footer");
+    }
+
+    #[test]
+    fn a_service_the_stock_init_started_is_never_started() {
+        let rules = b"on init\n    start servicemanager\n    start phoenix_recovery\n    # start phoenix_recovery\n    class_start default\n\nservice servicemanager /system/bin/servicemanager\n    class core\n\nservice phoenix_recovery /system/bin/phoenix_recovery\n    critical\n    seclabel u:r:recovery:s0\n";
+        let out = without_service(rules, "phoenix_recovery");
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out,
+            "on init\n    start servicemanager\n    # start phoenix_recovery\n    class_start default\n\nservice servicemanager /system/bin/servicemanager\n    class core\n\nservice phoenix_recovery /system/bin/phoenix_recovery\n    disabled\n    critical\n    seclabel u:r:recovery:s0\n"
+        );
+    }
+
+    #[test]
+    fn a_service_already_disabled_is_not_disabled_twice() {
+        let rules = b"service x /system/bin/x\n    disabled\n    critical\n";
+        assert_eq!(without_service(rules, "x"), rules.to_vec());
     }
 
     #[test]

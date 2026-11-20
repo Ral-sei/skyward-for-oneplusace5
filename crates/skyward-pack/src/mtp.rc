@@ -2,11 +2,19 @@
 # itself; once it has written the descriptors it sets sys.usb.ffs.mtp.ready,
 # and with adbd ready too, init binds the two together.
 on fs && property:sys.usb.configfs=1
+    # adb is started as the filesystems come up, and adbd in the recovery
+    # domain may not open the USB function while the policy enforces; the
+    # port then never leaves "none". Permissive before anything of it.
+    write /sys/fs/selinux/enforce 0
+    # The stock rules mount adb's functionfs in their own "on fs"; a second
+    # mount of the same instance name stands over it, and the gadget keeps
+    # to the first while adbd opens the second. Only the MTP function is
+    # mounted here; adb's is the stock's.
     mkdir /config/usb_gadget/g1/functions/ffs.mtp
     mkdir /dev/usb-ffs/mtp 0770 root root
-    mount functionfs mtp /dev/usb-ffs/mtp rmode=0770,fmode=0660,uid=0,gid=0
+    mount functionfs mtp /dev/usb-ffs/mtp rmode=0770,fmode=0660,uid=0,gid=0,no_disconnect=1
 
-on property:sys.usb.config=mtp,adb && property:sys.usb.config_disable=0
+on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
     start adbd
 
 on property:sys.usb.config=mtp,adb && property:sys.usb.ffs.ready=1 && property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.configfs=1
@@ -17,6 +25,18 @@ on property:sys.usb.config=mtp,adb && property:sys.usb.ffs.ready=1 && property:s
     write /config/usb_gadget/g1/UDC ${sys.usb.controller}
     setprop sys.usb.state ${sys.usb.config}
 
+# adbd is what says the function has its descriptors; when it goes, the
+# function goes with it, and a value left behind would bind a gadget that
+# has none.
+on property:init.svc.adbd=stopped
+    setprop sys.usb.ffs.ready 0
+
 # The stock rules take the first function off; this takes the second.
 on property:sys.usb.config=none && property:sys.usb.configfs=1
     rm /config/usb_gadget/g1/configs/b.1/f2
+
+# The stock rules bind adb as 18d1:d001, which a Windows computer with
+# Google's driver knows as an ADB interface. They are not bound again from
+# here: taking the gadget off the controller while adbd has its descriptors
+# makes adbd drop sys.usb.ffs.ready, which set this very rule going again,
+# and the port is torn down and made again without end.

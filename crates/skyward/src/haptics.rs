@@ -56,7 +56,7 @@ impl Haptics {
     /// only as it is played.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
         let (path, dev) = motor()?;
-        let hz = resonance(&cfg.resonance)?;
+        let hz = frequency(cfg)?;
         let click = match cfg.click {
             Some(id) => {
                 eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
@@ -150,12 +150,20 @@ fn takes_periodic(dev: &RawDevice) -> bool {
 }
 
 /// The motor's resonant frequency in hertz, from the file the driver says
-/// it in, in tenths of a hertz.
-fn resonance(file: &str) -> Result<f32> {
+/// it in: in tenths of a hertz, or as the motor's swinging period in
+/// microseconds on phones whose driver keeps no frequency.
+fn frequency(cfg: &skyward_config::Haptics) -> Result<f32> {
+    if let Some(file) = &cfg.resonance {
+        let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
+        let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
+        ensure!(tenths > 0, "{file} says the motor swings at 0 Hz");
+        return Ok(tenths as f32 / 10.0);
+    }
+    let file = cfg.period_us.as_deref().context("the configuration names the motor's frequency or its period")?;
     let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
-    let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
-    ensure!(tenths > 0, "{file} says the motor swings at 0 Hz");
-    Ok(tenths as f32 / 10.0)
+    let period: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
+    ensure!(period > 0, "{file} says the motor's period is 0 µs");
+    Ok(1_000_000.0 / period as f32)
 }
 
 /// A click as the driver loaded it: the slot the kernel keeps it in, and

@@ -132,7 +132,8 @@ pub fn read(text: &str) -> Result<Script> {
 /// The lines of a script that hold words, each with the number of the line
 /// it begins on and its words, split as init splits them: at blanks; with
 /// what is between double quotes kept as it is; with a `#` where a word
-/// would begin leaving the rest of the line out; and with a backslash
+/// would begin leaving the rest of the line out, and so a `//` or a `/* */
+/// block comment, as OPLUS's init takes them; and with a backslash
 /// taking the character after it as it is, or, before `n`, `r` or `t`, as
 /// the character C writes so, or, before the end of the line, carrying the
 /// line on in the next past the blanks that one begins with.
@@ -142,7 +143,18 @@ fn lines(text: &str) -> Result<Vec<(usize, Vec<String>)>> {
     let mut word: Option<String> = None;
     let (mut number, mut began) = (1, 1);
     let mut chars = text.chars().peekable();
+    let mut in_block = false;
     while let Some(c) = chars.next() {
+        if in_block {
+            if c == '\n' {
+                number += 1;
+                began = number;
+            } else if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
         match c {
             '\n' => {
                 words.extend(word.take());
@@ -155,6 +167,18 @@ fn lines(text: &str) -> Result<Vec<(usize, Vec<String>)>> {
             ' ' | '\t' | '\r' => words.extend(word.take()),
             '#' if word.is_none() => {
                 while chars.next_if(|&c| c != '\n').is_some() {}
+            }
+            // OPLUS's init takes a line beginning `//` as a comment too; a
+            // script of its phones comments out a whole service that way.
+            '/' if word.is_none() && chars.peek() == Some(&'/') => {
+                chars.next();
+                while chars.next_if(|&c| c != '\n').is_some() {}
+            }
+            // So does it take a block comment, which its phones put at the
+            // top of a script and between their sections.
+            '/' if word.is_none() && chars.peek() == Some(&'*') => {
+                chars.next();
+                in_block = true;
             }
             '"' => {
                 let quoted = word.get_or_insert_with(String::new);
@@ -310,6 +334,41 @@ mod tests {
         assert_eq!(weaver.capabilities.as_deref(), Some(&strings(&["WAKE_ALARM"])[..]));
         assert_eq!(weaver.interfaces, ["android.hardware.weaver.IWeaver/default"]);
         assert!(weaver.disabled && weaver.oneshot);
+    }
+
+    #[test]
+    fn a_line_beginning_with_slashes_is_a_comment_as_oplus_reads_it() {
+        let script = read(
+            "//move to odm to control project\n\
+             //service vendor.contexthub-default /vendor/bin/hw/android.hardware.contexthub-service.qmi\n\
+             //    class hal\n\
+             service vendor.contexthub /odm/bin/hw/android.hardware.contexthub-service.qmi\n\
+             \x20   class hal\n",
+        )
+        .unwrap();
+        let [program] = &script.programs[..] else { panic!("one service: the other is commented out") };
+        assert_eq!((program.name.as_str(), program.path.as_str()), ("vendor.contexthub", "/odm/bin/hw/android.hardware.contexthub-service.qmi"));
+        assert_eq!(program.classes, ["hal"]);
+    }
+
+    #[test]
+    fn a_block_comment_is_a_comment_as_oplus_reads_it() {
+        let script = read(
+            "/***************************************************************\n\
+             ** Copyright (C), OPLUS Mobile Comm Corp., Ltd.\n\
+             ** File: - occe_create\n\
+             ***************************************************************/\n\
+             \n\
+             service occe_create /odm/bin/occe_create\n\
+             \x20   class main\n\
+             \x20   oneshot\n\
+             \n\
+             /* Huo.Chen@SYSTEM.RF, Add for ICC */\n\
+             service vendor.icc /odm/bin/icc\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = script.programs.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["occe_create", "vendor.icc"]);
     }
 
     #[test]

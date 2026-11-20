@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 
 /// How long a program gets to become what it says it will be.
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL: Duration = Duration::from_millis(100);
 
 /// Where the kernel says the highest capability it knows.
@@ -391,7 +391,20 @@ fn run(s: &Service, who: &Credentials, given: &Given) -> Result<String> {
 /// searched after those it is given here.
 fn command(s: &Service, who: &Credentials, given: &Given, handed: &[(String, OwnedFd)]) -> Command {
     let mut cmd = Command::new(&s.path);
-    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(&s.args).current_dir("/").stdin(Stdio::null());
+    // A program that ends by itself says why on its own error stream; keep
+    // what it says beside the recovery's own lines, where the log page can
+    // show it after a phone that will not come up.
+    match fs::OpenOptions::new().create(true).append(true).open(skyward_sys::LOG) {
+        Ok(log) => {
+            let errors = log.try_clone().ok();
+            cmd.stdout(Stdio::from(log));
+            cmd.stderr(errors.map_or_else(Stdio::null, Stdio::from));
+        }
+        Err(_) => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
     let mut libraries = s.libraries.clone();
     for (name, value) in &given.environment {
         match name == LIBRARY_PATH {

@@ -39,8 +39,11 @@ const HOME: &str = "/skyward/run/supplicant";
 const WIFI: u32 = 1010;
 
 /// How long the driver may take to make its interface, the chip's firmware
-/// loading meanwhile.
-const INTERFACE_WAIT: Duration = Duration::from_secs(20);
+/// loading meanwhile. The handshake with the chip's firmware goes through
+/// cnss2, which may connect, fall back and connect again before the
+/// firmware is in: on the Ace 5 the interface came after twenty-one
+/// seconds, so the wait takes in a second try as well.
+const INTERFACE_WAIT: Duration = Duration::from_secs(60);
 
 /// How long the supplicant may take to open its control socket.
 const SOCKET_WAIT: Duration = Duration::from_secs(10);

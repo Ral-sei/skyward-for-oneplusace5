@@ -32,6 +32,9 @@ pub mod ramdisk {
     pub const PROP_DEFAULT: &str = "prop.default";
     /// The scheduling profiles libprocessgroup reads.
     pub const TASK_PROFILES: &str = "system/etc/task_profiles.json";
+    /// The init rules the stock recovery starts from, which start the
+    /// phone's own programs beside the recovery service.
+    pub const INIT_RC: &str = "system/etc/init/hw/init.rc";
     /// The init rules that set up file transfer's USB function.
     pub const MTP_RC: &str = "system/etc/init/skyward-mtp.rc";
 
@@ -213,7 +216,13 @@ pub struct Haptics {
     pub click: Option<i16>,
     /// The file the driver says the motor's resonant frequency in, in
     /// tenths of a hertz whatever its label.
-    pub resonance: String,
+    #[serde(default)]
+    pub resonance: Option<String>,
+    /// The file the driver says the motor's swinging period in, in
+    /// microseconds, on phones whose driver keeps no frequency: the motor
+    /// swings at one million divided by it a second.
+    #[serde(default)]
+    pub period_us: Option<String>,
     pub strength: Strength,
 }
 
@@ -271,6 +280,17 @@ pub struct Device {
     /// System property that carries the vendor OS version.
     #[serde(default = "default_os_version_prop")]
     pub os_version_prop: String,
+    /// Whether the recovery offers file transfer over USB beside adb by
+    /// itself, as most stock recoveries do. A stock recovery whose own
+    /// rules never bring that function up leaves adb alone.
+    #[serde(default = "default_true")]
+    pub mtp: bool,
+    /// Whether the recovery runs SELinux permissive. OPLUS's recovery
+    /// policy lets neither the key programs nor qseecomd reach the secure
+    /// world from the recovery domain; the port's own recoveries run
+    /// permissive there.
+    #[serde(default)]
+    pub selinux_permissive: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -539,8 +559,14 @@ impl DeviceConfig {
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
         if let Some(haptics) = &cfg.haptics {
-            let file = &haptics.resonance;
-            ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
+            let named = [("resonance", haptics.resonance.as_deref()), ("period_us", haptics.period_us.as_deref())];
+            let count = named.iter().filter(|(_, file)| file.is_some()).count();
+            ensure!(count == 1, "[haptics]: name the motor's resonant frequency or its period, one of them");
+            for (field, file) in named {
+                if let Some(file) = file {
+                    ensure!(Path::new(file).is_absolute(), "[haptics] {field}: {file} is not an absolute path");
+                }
+            }
             let Strength { lightest, strongest } = haptics.strength;
             ensure!(
                 0.0 < lightest && lightest < strongest && strongest <= 1.0,
@@ -641,7 +667,8 @@ mod tests {
     fn ishtar_clicks_with_a_waveform_its_driver_keeps() {
         let cfg = DeviceConfig::parse(include_str!("../../../devices/ishtar.toml")).unwrap();
         let haptics = cfg.haptics.expect("the 13 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_str()), (Some(0), "/sys/class/qcom-haptics/lra_frequency_hz"));
+        assert_eq!((haptics.click, haptics.resonance.as_deref()), (Some(0), Some("/sys/class/qcom-haptics/lra_frequency_hz")));
+        assert_eq!(haptics.period_us, None);
         assert_eq!(haptics.strength, Strength { lightest: 0.5, strongest: 1.0 });
     }
 
@@ -649,10 +676,15 @@ mod tests {
     fn a_click_is_kept_or_made_and_its_strengths_rise() {
         let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
         let (strength, resonance) = ("strength = { lightest = 0.25, strongest = 1.0 }", "resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"");
+        let period = "period_us = \"/sys/class/qcom-haptics/t_lra_us\"";
         assert!(with(&format!("{resonance}\n{strength}")).is_ok(), "a click made");
         assert!(with(&format!("click = 0\n{resonance}\n{strength}")).is_ok(), "a click kept");
+        assert!(with(&format!("{period}\n{strength}")).is_ok(), "a click made from the motor's period");
+        assert!(with(&format!("click = 0\n{period}\n{strength}")).is_ok(), "a click kept with the motor's period");
         assert!(with(&format!("click = 0\n{strength}")).is_err(), "no motor's resonance to make the ticks at");
         assert!(with(&format!("resonance = \"sys/f\"\n{strength}")).is_err(), "a file named from nowhere");
+        assert!(with(&format!("period_us = \"sys/f\"\n{strength}")).is_err(), "a period named from nowhere");
+        assert!(with(&format!("{resonance}\n{period}\n{strength}")).is_err(), "both a frequency and a period");
         assert!(with(resonance).is_err(), "a click without its strengths");
         for (lightest, strongest) in [(0.0, 0.5), (0.5, 0.5), (0.5, 0.25), (0.25, 1.5)] {
             let s = format!("{resonance}\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
@@ -707,11 +739,52 @@ mod tests {
         assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
         assert_eq!(post_boot.libraries, ["/system/lib64", "/vendor/lib64"], "it loads the recovery's own libraries first");
         let haptics = cfg.haptics.expect("the 17 Ultra has a motor");
-        assert_eq!((haptics.click, haptics.resonance.as_str()), (None, "/sys/class/qcom-haptics/lra_frequency_hz"), "its click is made");
+        assert_eq!(
+            (haptics.click, haptics.resonance.as_deref(), haptics.period_us.as_deref()),
+            (None, Some("/sys/class/qcom-haptics/lra_frequency_hz"), None),
+            "its click is made"
+        );
         assert_eq!(haptics.strength, Strength { lightest: 0.25, strongest: 0.75 }, "past three quarters the motor rattles");
         assert_eq!(cfg.backup.efs, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
         assert!(cfg.backup.data_skipped.contains(&"vendor/goodix".to_string()));
         assert!(cfg.wipe.logs.contains(&"/data/vendor/bsplog".to_string()));
+    }
+
+    #[test]
+    fn parses_ossi() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/ossi.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "ossi");
+        assert_eq!(cfg.device.model, "OnePlus Ace 5");
+        assert!(cfg.device.mtp, "the recovery serves file transfer beside adb over the port it brings up itself");
+        assert!(cfg.device.selinux_permissive, "the recovery domain cannot reach the tee nodes");
+        assert_eq!((cfg.display.width, cfg.display.height, cfg.display.corner_radius), (1264, 2780, 134));
+        assert_eq!(
+            cfg.modules.load,
+            [
+                "oplus_bsp_synaptics_tcm2",
+                "qcom-hv-haptics",
+                "nxp-nci",
+                "wcd939x_dlkm",
+                "wcd_usbss_i2c",
+                "fsa4480-i2c",
+                "redriver",
+                "repeater",
+                "repeater-qti-pmic-eusb2",
+            ],
+            "the port's switch, redriver and repeater go with the ones the recovery loads for the screen and the keys"
+        );
+        assert_eq!(cfg.partitions.mounted, ["persist"]);
+        assert_eq!(cfg.owners.len(), 1, "the NFC chip's node is handed to the account its service runs as");
+        assert_eq!(cfg.owners[0].paths, ["/dev/nq-nci"]);
+        assert_eq!((cfg.owners[0].user.as_str(), cfg.owners[0].group.as_str()), ("nfc", "nfc"));
+        let [post_boot] = &cfg.services[..] else { panic!("one program: those that use the phone's keys are read from the phone's own partitions") };
+        assert_eq!(post_boot.args, ["/vendor/bin/init.kernel.post_boot.sh"]);
+        let haptics = cfg.haptics.expect("the Ace 5 has a motor");
+        assert_eq!((haptics.resonance.as_deref(), haptics.period_us.as_deref()), (None, Some("/sys/class/qcom-haptics/t_lra_us")));
+        let wlan = cfg.wlan.expect("its WLAN is brought up");
+        assert_eq!(wlan.modules, ["rfkill", "qca_cld3_kiwi_v2"]);
+        assert_eq!(wlan.firmware[0].name, "wlan/qca_cld/kiwi_v2/WCNSS_qcom_cfg.ini");
+        assert!(cfg.stock.is_none(), "the stock image is given to the packer instead");
     }
 
     #[test]

@@ -227,10 +227,14 @@ const RECORD_MOST: usize = 1024 - 48;
 /// file takes the text first and whole; the kernel takes each of its lines
 /// as a record of its own, and a line longer than a record as several.
 pub fn kmsg(text: &str) -> Result<()> {
+    let stamp = since_boot().ok().map(|at| format!("[{:>12.6}] ", at.as_secs_f64()));
     let kept = match KEPT.get() {
         Some(kept) => {
             let mut kept = kept.lock().expect("nothing panics while writing the log");
-            since_boot().and_then(|at| writeln!(kept, "[{:>12.6}] {text}", at.as_secs_f64()).with_context(|| format!("write {LOG}")))
+            match &stamp {
+                Some(stamp) => writeln!(kept, "{stamp}{text}").with_context(|| format!("write {LOG}")),
+                None => Ok(()),
+            }
         }
         None => Ok(()),
     };
